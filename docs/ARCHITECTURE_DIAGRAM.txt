@@ -1,0 +1,225 @@
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         embedspicedb Architecture                           │
+│                         (Single Process Embedding)                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          Application Process                                │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐  │
+│  │                    embedspicedb.EmbeddedServer                       │  │
+│  │                                                                       │  │
+│  │  ┌───────────────────────────────────────────────────────────────┐  │  │
+│  │  │                    Configuration Layer                         │  │  │
+│  │  │  ┌─────────────────────────────────────────────────────────┐  │  │  │
+│  │  │  │  Config                                                  │  │  │  │
+│  │  │  │  • SchemaFiles: []string                                │  │  │  │
+│  │  │  │  • GRPCAddress: ":50051"                                │  │  │  │
+│  │  │  │  • PresharedKey: "dev-key"                               │  │  │  │
+│  │  │  │  • WatchDebounce: 500ms                                  │  │  │  │
+│  │  │  │  • RevisionQuantization: 5s                              │  │  │  │
+│  │  │  │  • GCWindow: 24h                                         │  │  │  │
+│  │  │  └─────────────────────────────────────────────────────────┘  │  │  │
+│  │  └───────────────────────────────────────────────────────────────┘  │  │
+│  │                                                                       │  │
+│  │  ┌───────────────────────────────────────────────────────────────┐  │  │
+│  │  │                    FileWatcher Component                      │  │  │
+│  │  │  ┌─────────────────────────────────────────────────────────┐  │  │  │
+│  │  │  │  fsnotify.Watcher                                       │  │  │  │
+│  │  │  │  • Monitors schema file directories                      │  │  │  │
+│  │  │  │  • Detects Write/Create events                          │  │  │  │
+│  │  │  │  • Debounces rapid changes (500ms)                      │  │  │  │
+│  │  │  │  • Tracks pending file changes                          │  │  │  │
+│  │  │  └─────────────────────────────────────────────────────────┘  │  │  │
+│  │  │                          │                                     │  │  │
+│  │  │                          ▼                                     │  │  │
+│  │  │  ┌─────────────────────────────────────────────────────────┐  │  │  │
+│  │  │  │  Debounce Timer                                         │  │  │  │
+│  │  │  │  • Cancels on new changes                               │  │  │  │
+│  │  │  │  • Triggers reload after debounce                       │  │  │  │
+│  │  │  └─────────────────────────────────────────────────────────┘  │  │  │
+│  │  └───────────────────────────────────────────────────────────────┘  │  │
+│  │                          │                                           │  │
+│  │                          ▼                                           │  │
+│  │  ┌───────────────────────────────────────────────────────────────┐  │  │
+│  │  │                 SchemaReloader Component                      │  │  │
+│  │  │  ┌─────────────────────────────────────────────────────────┐  │  │  │
+│  │  │  │  File Reader                                            │  │  │  │
+│  │  │  │  • Reads .zed files (plain schema)                     │  │  │  │
+│  │  │  │  • Reads .yaml/.yml files (validation files)           │  │  │  │
+│  │  │  │  • Parses YAML to extract schema                       │  │  │  │
+│  │  │  │  • Combines multiple schema files                      │  │  │  │
+│  │  │  └─────────────────────────────────────────────────────────┘  │  │  │
+│  │  │                          │                                     │  │  │
+│  │  │                          ▼                                     │  │  │
+│  │  │  ┌─────────────────────────────────────────────────────────┐  │  │  │
+│  │  │  │  SchemaServiceClient                                    │  │  │  │
+│  │  │  │  • WriteSchema API call                                 │  │  │  │
+│  │  │  │  • Validates schema                                     │  │  │  │
+│  │  │  │  • Updates SpiceDB schema                               │  │  │  │
+│  │  │  └─────────────────────────────────────────────────────────┘  │  │  │
+│  │  └───────────────────────────────────────────────────────────────┘  │  │
+│  │                          │                                           │  │
+│  │                          ▼                                           │  │
+│  │  ┌───────────────────────────────────────────────────────────────┐  │  │
+│  │  │              SpiceDB Server (RunnableServer)                 │  │  │
+│  │  │                                                                 │  │
+│  │  │  ┌─────────────────────────────────────────────────────────┐  │  │
+│  │  │  │  gRPC Server (:50051)                                   │  │  │
+│  │  │  │  ┌───────────────────────────────────────────────────┐  │  │  │
+│  │  │  │  │  SchemaService                                    │  │  │  │
+│  │  │  │  │  • ReadSchema                                     │  │  │  │
+│  │  │  │  │  • WriteSchema                                    │  │  │  │
+│  │  │  │  └───────────────────────────────────────────────────┘  │  │  │
+│  │  │  │  ┌───────────────────────────────────────────────────┐  │  │  │
+│  │  │  │  │  PermissionsService                              │  │  │  │
+│  │  │  │  │  • CheckPermission                               │  │  │  │
+│  │  │  │  │  • WriteRelationships                            │  │  │  │
+│  │  │  │  │  • ReadRelationships                             │  │  │  │
+│  │  │  │  │  • DeleteRelationships                            │  │  │  │
+│  │  │  │  └───────────────────────────────────────────────────┘  │  │  │
+│  │  │  └─────────────────────────────────────────────────────────┘  │  │
+│  │  │                                                                 │  │
+│  │  │  ┌─────────────────────────────────────────────────────────┐  │  │
+│  │  │  │  HTTP Gateway (Optional, :8443)                         │  │  │
+│  │  │  │  • REST API for SpiceDB                                 │  │  │
+│  │  │  │  • gRPC-Web support                                     │  │  │
+│  │  │  └─────────────────────────────────────────────────────────┘  │  │
+│  │  │                                                                 │  │
+│  │  │  ┌─────────────────────────────────────────────────────────┐  │  │
+│  │  │  │  Permission Evaluation Engine                           │  │  │
+│  │  │  │  • Relationship traversal                              │  │  │
+│  │  │  │  • Permission calculation                              │  │  │
+│  │  │  │  • Schema validation                                   │  │  │
+│  │  │  └─────────────────────────────────────────────────────────┘  │  │
+│  │  │                          │                                     │  │
+│  │  │                          ▼                                     │  │
+│  │  │  ┌─────────────────────────────────────────────────────────┐  │  │
+│  │  │  │  Datastore (Configurable)                                │  │  │
+│  │  │  │                                                           │  │  │
+│  │  │  │  Option 1: In-Memory (memdb) - Default                  │  │  │
+│  │  │  │  ┌───────────────────────────────────────────────────┐  │  │  │
+│  │  │  │  │  • Non-persistent                                 │  │  │  │
+│  │  │  │  │  • Fast, suitable for development                 │  │  │  │
+│  │  │  │  │  • Data lost on restart                           │  │  │  │
+│  │  │  │  └───────────────────────────────────────────────────┘  │  │  │
+│  │  │  │                                                           │  │  │
+│  │  │  │  Option 2: PostgreSQL - Production                     │  │  │
+│  │  │  │  ┌───────────────────────────────────────────────────┐  │  │  │
+│  │  │  │  │  • Fully persistent                               │  │  │  │
+│  │  │  │  │  • Production-ready                               │  │  │  │
+│  │  │  │  │  • Compatible with CockroachDB                    │  │  │  │
+│  │  │  │  └───────────────────────────────────────────────────┘  │  │  │
+│  │  │  │                                                           │  │  │
+│  │  │  │  Option 3: MySQL - Production                          │  │  │
+│  │  │  │  ┌───────────────────────────────────────────────────┐  │  │  │
+│  │  │  │  │  • Fully persistent                               │  │  │  │
+│  │  │  │  │  • Production-ready                               │  │  │  │
+│  │  │  │  │  • Requires parseTime=true                         │  │  │  │
+│  │  │  │  └───────────────────────────────────────────────────┘  │  │  │
+│  │  │  │                                                           │  │  │
+│  │  │  │  Common Features:                                       │  │  │
+│  │  │  │  • Relationship storage                                 │  │  │
+│  │  │  │  • Schema storage                                      │  │  │
+│  │  │  │  • Revision tracking                                   │  │  │
+│  │  │  │  • Revision quantization (5s)                         │  │  │
+│  │  │  │  • GC window (24h)                                     │  │  │
+│  │  │  └─────────────────────────────────────────────────────────┘  │  │
+│  │  └───────────────────────────────────────────────────────────────┘  │  │
+│  │                          │                                           │  │
+│  │                          ▼                                           │  │
+│  │  ┌───────────────────────────────────────────────────────────────┐  │  │
+│  │  │              gRPC Client Connection                          │  │  │
+│  │  │  • Insecure credentials (localhost only)                     │  │  │
+│  │  │  • Used by SchemaReloader                                   │  │  │
+│  │  │  • Exposed via Client() method                              │  │  │
+│  │  └───────────────────────────────────────────────────────────────┘  │  │
+│  └─────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐  │
+│  │                    Application Code                                 │  │
+│  │  • server.Client() → Get gRPC connection                           │  │
+│  │  • Create service clients (Schema, Permissions, etc.)              │  │
+│  │  • Call SpiceDB APIs                                               │  │
+│  │  • Register OnSchemaReloaded callbacks                            │  │
+│  └─────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         External Dependencies                              │
+│                                                                             │
+│  • fsnotify: File system event notifications                                │
+│  • SpiceDB internal packages:                                               │
+│    - internal/datastore/memdb                                               │
+│    - internal/logging                                                       │
+│    - pkg/cmd/server                                                         │
+│    - pkg/cmd/util                                                           │
+│    - pkg/datastore                                                          │
+│    - pkg/validationfile                                                     │
+│  • authzed-go: gRPC client libraries                                       │
+│  • google.golang.org/grpc: gRPC framework                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Data Flow: Hot Reload                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+   Schema File Change
+         │
+         ▼
+   fsnotify detects Write/Create event
+         │
+         ▼
+   FileWatcher.handleFileChange()
+         │
+         ├─> Add to pending map
+         ├─> Cancel existing timer
+         └─> Start debounce timer (500ms)
+         │
+         ▼
+   Timer expires
+         │
+         ▼
+   FileWatcher calls reloadFunc()
+         │
+         ▼
+   EmbeddedServer.ReloadSchema()
+         │
+         ▼
+   SchemaReloader.Reload()
+         │
+         ├─> Read all schema files
+         ├─> Parse YAML files (if any)
+         ├─> Combine schemas
+         └─> WriteSchema API call
+         │
+         ▼
+   SpiceDB validates and applies schema
+         │
+         ▼
+   OnSchemaReloaded callbacks invoked
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Comparison: embedspicedb vs Real SpiceDB                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────┬──────────────────┬──────────────────────────────┐
+│ Feature              │ embedspicedb     │ Real SpiceDB                 │
+├──────────────────────┼──────────────────┼──────────────────────────────┤
+│ Deployment           │ Embedded         │ Standalone Service           │
+│ Datastore            │ memdb/PostgreSQL │ PostgreSQL/MySQL/Spanner    │
+│                      │ /MySQL           │                              │
+│ Persistence          │ ✅ With PG/MySQL │ ✅ Full                      │
+│                      │ ❌ With memdb    │                              │
+│ Scalability          │ ❌ Single node   │ ✅ Multi-node                │
+│ High Availability    │ ❌ None          │ ✅ Built-in                  │
+│ Dispatch Server      │ ❌ Disabled      │ ✅ Enabled                   │
+│ Metrics/Monitoring   │ ❌ Disabled      │ ✅ Full                      │
+│ API Compatibility    │ ✅ 100%          │ ✅ 100%                      │
+│ Permission Engine    │ ✅ Same          │ ✅ Same                      │
+│ Schema Validation    │ ✅ Same          │ ✅ Same                      │
+│ Production Ready     │ ✅ With PG/MySQL │ ✅ Yes                       │
+│                      │ ⚠️ Dev with memdb │                              │
+└──────────────────────┴──────────────────┴──────────────────────────────┘
+
