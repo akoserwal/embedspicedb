@@ -37,9 +37,14 @@ func (es *EmbeddedServer) HealthCheck(ctx context.Context) (*HealthStatus, error
 		Checks:    make(map[string]string),
 	}
 
+	// Read all state under a single lock to ensure consistency
 	es.mu.RLock()
 	started := es.started
 	startTime := es.startTime
+	conn := es.conn
+	ds := es.datastore
+	reloader := es.reloader
+	schemaFiles := es.config.SchemaFiles
 	es.mu.RUnlock()
 
 	// Check if server is started
@@ -57,30 +62,29 @@ func (es *EmbeddedServer) HealthCheck(ctx context.Context) (*HealthStatus, error
 		status.StartTime = startTime
 	}
 
-	// Check gRPC connection
-	es.mu.RLock()
-	conn := es.conn
-	es.mu.RUnlock()
+	// Check gRPC connection and schema in one call (avoid duplicate ReadSchema calls)
+	var schemaResp *v1.ReadSchemaResponse
+	var schemaErr error
 
 	if conn == nil {
 		status.Checks["grpc_connection"] = "not_available"
 		status.Status = "degraded"
 	} else {
-		// Try to use the connection to verify it's working
+		// Try to use the connection to verify it's working by reading schema once
 		schemaClient := v1.NewSchemaServiceClient(conn)
-		_, err := schemaClient.ReadSchema(ctx, &v1.ReadSchemaRequest{})
-		if err != nil {
+		schemaResp, schemaErr = schemaClient.ReadSchema(ctx, &v1.ReadSchemaRequest{})
+		if schemaErr != nil {
 			// If no schema files are configured, treat "no schema defined" as still healthy:
 			// the server is up and can accept schema writes programmatically.
-			if len(es.config.SchemaFiles) == 0 {
-				if st, ok := grpcstatus.FromError(err); ok && st.Code() == codes.NotFound {
+			if len(schemaFiles) == 0 {
+				if st, ok := grpcstatus.FromError(schemaErr); ok && st.Code() == codes.NotFound {
 					status.Checks["grpc_connection"] = "healthy (no schema defined)"
 				} else {
-					status.Checks["grpc_connection"] = fmt.Sprintf("error: %v", err)
+					status.Checks["grpc_connection"] = fmt.Sprintf("error: %v", schemaErr)
 					status.Status = "degraded"
 				}
 			} else {
-				status.Checks["grpc_connection"] = fmt.Sprintf("error: %v", err)
+				status.Checks["grpc_connection"] = fmt.Sprintf("error: %v", schemaErr)
 				status.Status = "degraded"
 			}
 		} else {
@@ -89,10 +93,6 @@ func (es *EmbeddedServer) HealthCheck(ctx context.Context) (*HealthStatus, error
 	}
 
 	// Check datastore
-	es.mu.RLock()
-	ds := es.datastore
-	es.mu.RUnlock()
-
 	if ds == nil {
 		status.Checks["datastore"] = "not_available"
 		status.Status = "unhealthy"
@@ -116,29 +116,19 @@ func (es *EmbeddedServer) HealthCheck(ctx context.Context) (*HealthStatus, error
 	}
 
 	// Check schema availability (if schema files were configured)
-	if len(es.config.SchemaFiles) > 0 {
-		es.mu.RLock()
-		reloader := es.reloader
-		es.mu.RUnlock()
-
+	// Reuse the schema response from the gRPC check above
+	if len(schemaFiles) > 0 {
 		if reloader == nil {
 			status.Checks["schema"] = "reloader_not_available"
 			status.Status = "degraded"
+		} else if schemaErr != nil {
+			status.Checks["schema"] = fmt.Sprintf("error: %v", schemaErr)
+			status.Status = "degraded"
+		} else if schemaResp == nil || schemaResp.SchemaText == "" {
+			status.Checks["schema"] = "not_loaded"
+			status.Status = "degraded"
 		} else {
-			// Try to read schema to verify it's loaded
-			if conn != nil {
-				schemaClient := v1.NewSchemaServiceClient(conn)
-				resp, err := schemaClient.ReadSchema(ctx, &v1.ReadSchemaRequest{})
-				if err != nil {
-					status.Checks["schema"] = fmt.Sprintf("error: %v", err)
-					status.Status = "degraded"
-				} else if resp.SchemaText == "" {
-					status.Checks["schema"] = "not_loaded"
-					status.Status = "degraded"
-				} else {
-					status.Checks["schema"] = "loaded"
-				}
-			}
+			status.Checks["schema"] = "loaded"
 		}
 	} else {
 		status.Checks["schema"] = "not_configured"

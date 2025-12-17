@@ -3,7 +3,6 @@ package schema
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,96 +38,13 @@ func (r *SchemaReloader) Reload(ctx context.Context) error {
 
 	// Read all schema files and combine them
 	var schemaParts []string
-	var yamlFiles []string
 
 	for _, filePath := range r.files {
-		ext := strings.ToLower(filepath.Ext(filePath))
-		if ext == ".yaml" || ext == ".yml" {
-			yamlFiles = append(yamlFiles, filePath)
-		} else {
-			// Assume .zed or plain text schema
-			content, err := os.ReadFile(filePath)
-			if err != nil {
-				return fmt.Errorf("failed to read schema file %s: %w", filePath, err)
-			}
-			schemaParts = append(schemaParts, string(content))
+		content, err := ReadSchemaFile(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to read schema file %s: %w", filePath, err)
 		}
-	}
-
-	// Handle YAML validation files
-	if len(yamlFiles) > 0 {
-		for _, yamlFile := range yamlFiles {
-			content, err := os.ReadFile(yamlFile)
-			if err != nil {
-				return fmt.Errorf("failed to read YAML file %s: %w", yamlFile, err)
-			}
-
-			parsed, err := validationfile.DecodeValidationFile(content)
-			if err != nil {
-				// Fallback: allow minimal YAML with schema/schema_file keys.
-				var m map[string]any
-				if yerr := yaml.Unmarshal(content, &m); yerr != nil {
-					return fmt.Errorf("failed to parse YAML file %s: %w", yamlFile, err)
-				}
-				if v, ok := m["schema"]; ok {
-					if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-						schemaParts = append(schemaParts, s)
-						continue
-					}
-				}
-				if v, ok := m["schema_file"]; ok {
-					if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-						ref := s
-						if !filepath.IsLocal(ref) {
-							return fmt.Errorf("schema file %q is not local", ref)
-						}
-						schemaPath := filepath.Join(filepath.Dir(yamlFile), ref)
-						schemaContent, err := os.ReadFile(schemaPath)
-						if err != nil {
-							return fmt.Errorf("failed to read referenced schema file %s: %w", schemaPath, err)
-						}
-						schemaParts = append(schemaParts, string(schemaContent))
-						continue
-					}
-				}
-
-				return fmt.Errorf("failed to parse YAML file %s: %w", yamlFile, err)
-			}
-
-			if parsed.Schema.Schema != "" {
-				schemaParts = append(schemaParts, parsed.Schema.Schema)
-			} else if parsed.SchemaFile != "" {
-				ref := parsed.SchemaFile
-				if !filepath.IsLocal(ref) {
-					return fmt.Errorf("schema file %q is not local", ref)
-				}
-				schemaPath := filepath.Join(filepath.Dir(yamlFile), ref)
-				schemaContent, err := os.ReadFile(schemaPath)
-				if err != nil {
-					return fmt.Errorf("failed to read referenced schema file %s: %w", schemaPath, err)
-				}
-				schemaParts = append(schemaParts, string(schemaContent))
-			} else {
-				// Fallback for minimal YAML where schema_file isn't part of validationfile fields.
-				var m map[string]any
-				if err := yaml.Unmarshal(content, &m); err == nil {
-					if v, ok := m["schema_file"]; ok {
-						if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-							ref := s
-							if !filepath.IsLocal(ref) {
-								return fmt.Errorf("schema file %q is not local", ref)
-							}
-							schemaPath := filepath.Join(filepath.Dir(yamlFile), ref)
-							schemaContent, err := os.ReadFile(schemaPath)
-							if err != nil {
-								return fmt.Errorf("failed to read referenced schema file %s: %w", schemaPath, err)
-							}
-							schemaParts = append(schemaParts, string(schemaContent))
-						}
-					}
-				}
-			}
-		}
+		schemaParts = append(schemaParts, content)
 	}
 
 	combinedSchema := strings.Join(schemaParts, "\n\n")
@@ -156,96 +72,76 @@ func ReadSchemaFile(filePath string) (string, error) {
 			return "", err
 		}
 
-		parsed, err := validationfile.DecodeValidationFile(content)
+		schema, err := schemaFromYAML(filePath, content)
 		if err != nil {
-			// Fallback: allow minimal YAML files that only contain schema/schema_file keys.
-			var m map[string]any
-			if yerr := yaml.Unmarshal(content, &m); yerr != nil {
-				return "", fmt.Errorf("failed to parse YAML file: %w", err)
-			}
-			if v, ok := m["schema"]; ok {
-				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					return s, nil
-				}
-			}
-			if v, ok := m["schema_file"]; ok {
-				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					ref := s
-					if !filepath.IsLocal(ref) {
-						return "", fmt.Errorf("schema file %q is not local", ref)
-					}
-					schemaPath := filepath.Join(filepath.Dir(filePath), ref)
-					schemaContent, err := os.ReadFile(schemaPath)
-					if err != nil {
-						return "", fmt.Errorf("failed to read referenced schema file: %w", err)
-					}
-					return string(schemaContent), nil
-				}
-			}
-			if v, ok := m["schemaFile"]; ok { // alternate spelling
-				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					ref := s
-					if !filepath.IsLocal(ref) {
-						return "", fmt.Errorf("schema file %q is not local", ref)
-					}
-					schemaPath := filepath.Join(filepath.Dir(filePath), ref)
-					schemaContent, err := os.ReadFile(schemaPath)
-					if err != nil {
-						return "", fmt.Errorf("failed to read referenced schema file: %w", err)
-					}
-					return string(schemaContent), nil
-				}
-			}
-
-			return "", fmt.Errorf("failed to parse YAML file: %w", err)
+			return "", err
 		}
-
-		if parsed.Schema.Schema != "" {
-			return parsed.Schema.Schema, nil
-		} else if parsed.SchemaFile != "" {
-			ref := parsed.SchemaFile
-			if !filepath.IsLocal(ref) {
-				return "", fmt.Errorf("schema file %q is not local", ref)
-			}
-			schemaPath := filepath.Join(filepath.Dir(filePath), ref)
-			schemaContent, err := os.ReadFile(schemaPath)
-			if err != nil {
-				return "", fmt.Errorf("failed to read referenced schema file: %w", err)
-			}
-			return string(schemaContent), nil
+		if strings.TrimSpace(schema) == "" {
+			return "", fmt.Errorf("no schema found in YAML file")
 		}
-		// Fallback for minimal YAML: schema_file can exist outside validationfile's schema.
-		var m map[string]any
-		if err := yaml.Unmarshal(content, &m); err == nil {
-			if v, ok := m["schema_file"]; ok {
-				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					ref := s
-					if !filepath.IsLocal(ref) {
-						return "", fmt.Errorf("schema file %q is not local", ref)
-					}
-					schemaPath := filepath.Join(filepath.Dir(filePath), ref)
-					schemaContent, err := os.ReadFile(schemaPath)
-					if err != nil {
-						return "", fmt.Errorf("failed to read referenced schema file: %w", err)
-					}
-					return string(schemaContent), nil
-				}
-			}
-		}
-		return "", fmt.Errorf("no schema found in YAML file")
+		return schema, nil
 	}
 
 	// Read as plain text (.zed or other)
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	content, err := io.ReadAll(file)
+	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return "", err
 	}
 
 	return string(content), nil
+}
+
+func schemaFromYAML(yamlFilePath string, content []byte) (string, error) {
+	parsed, err := validationfile.DecodeValidationFile(content)
+	if err == nil {
+		if parsed.Schema.Schema != "" {
+			return parsed.Schema.Schema, nil
+		}
+		if parsed.SchemaFile != "" {
+			return readReferencedSchemaFile(yamlFilePath, parsed.SchemaFile)
+		}
+		// Fall through to minimal YAML parsing below for cases not covered by validationfile.
+	}
+
+	var m map[string]any
+	if yerr := yaml.Unmarshal(content, &m); yerr != nil {
+		// Prefer the DecodeValidationFile error if we had one, but at least surface something consistent.
+		if err != nil {
+			return "", fmt.Errorf("failed to parse YAML file: %w", err)
+		}
+		return "", fmt.Errorf("failed to parse YAML file: %w", yerr)
+	}
+
+	if v, ok := m["schema"]; ok {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			return s, nil
+		}
+	}
+	if v, ok := m["schema_file"]; ok {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			return readReferencedSchemaFile(yamlFilePath, s)
+		}
+	}
+	if v, ok := m["schemaFile"]; ok { // alternate spelling
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			return readReferencedSchemaFile(yamlFilePath, s)
+		}
+	}
+
+	if err != nil {
+		return "", fmt.Errorf("failed to parse YAML file: %w", err)
+	}
+	return "", fmt.Errorf("no schema found in YAML file")
+}
+
+func readReferencedSchemaFile(yamlFilePath, ref string) (string, error) {
+	if !filepath.IsLocal(ref) {
+		return "", fmt.Errorf("schema file %q is not local", ref)
+	}
+	schemaPath := filepath.Join(filepath.Dir(yamlFilePath), ref)
+	schemaContent, err := os.ReadFile(schemaPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read referenced schema file %s: %w", schemaPath, err)
+	}
+	return string(schemaContent), nil
 }

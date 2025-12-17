@@ -1,6 +1,10 @@
 package embedspicedb
 
 import (
+	"errors"
+	"fmt"
+	"net"
+	"strings"
 	"time"
 )
 
@@ -109,4 +113,56 @@ func (c *Config) WithDefaults() {
 	if c.HealthCheckAddress == "" && c.HealthCheckEnabled {
 		c.HealthCheckAddress = "127.0.0.1:0"
 	}
+}
+
+// Validate validates the configuration after defaults have been applied.
+// It returns a single error containing all validation errors (via errors.Join).
+func (c Config) Validate() error {
+	var errs []error
+
+	if strings.TrimSpace(c.GRPCAddress) == "" {
+		errs = append(errs, fmt.Errorf("GRPCAddress must not be empty"))
+	} else if _, err := net.ResolveTCPAddr("tcp", c.GRPCAddress); err != nil {
+		errs = append(errs, fmt.Errorf("GRPCAddress %q is invalid: %w", c.GRPCAddress, err))
+	}
+
+	if c.HTTPEnabled {
+		if strings.TrimSpace(c.HTTPAddress) == "" {
+			errs = append(errs, fmt.Errorf("HTTPAddress must not be empty when HTTPEnabled is true"))
+		} else if _, err := net.ResolveTCPAddr("tcp", c.HTTPAddress); err != nil {
+			errs = append(errs, fmt.Errorf("HTTPAddress %q is invalid: %w", c.HTTPAddress, err))
+		}
+	}
+
+	if strings.TrimSpace(c.PresharedKey) == "" {
+		errs = append(errs, fmt.Errorf("PresharedKey must not be empty"))
+	}
+
+	dsType := strings.ToLower(strings.TrimSpace(c.DatastoreType))
+	switch dsType {
+	case "", "memdb":
+		// ok
+	case "postgres", "postgresql", "mysql":
+		if strings.TrimSpace(c.DatastoreURI) == "" {
+			errs = append(errs, fmt.Errorf("DatastoreURI must not be empty when DatastoreType is %q", c.DatastoreType))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("unsupported DatastoreType %q (supported: memdb, postgres, mysql)", c.DatastoreType))
+	}
+
+	if c.HealthCheckEnabled {
+		if strings.TrimSpace(c.HealthCheckAddress) == "" {
+			errs = append(errs, fmt.Errorf("HealthCheckAddress must not be empty when HealthCheckEnabled is true"))
+		} else if _, err := net.ResolveTCPAddr("tcp", c.HealthCheckAddress); err != nil {
+			errs = append(errs, fmt.Errorf("HealthCheckAddress %q is invalid: %w", c.HealthCheckAddress, err))
+		}
+	}
+
+	for i, f := range c.SchemaFiles {
+		if strings.TrimSpace(f) == "" {
+			errs = append(errs, fmt.Errorf("SchemaFiles[%d] must not be empty", i))
+		}
+	}
+
+	return errors.Join(errs...)
 }

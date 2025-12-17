@@ -54,9 +54,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s == nil || s.srv == nil {
 		return nil
 	}
-	err := s.srv.Shutdown(ctx)
-	if s.ln != nil {
-		_ = s.ln.Close()
-	}
-	return err
+	// Shutdown will stop accepting new connections and gracefully drain existing ones.
+	// It also closes the listener used by Serve.
+	return s.srv.Shutdown(ctx)
 }

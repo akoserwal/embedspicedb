@@ -39,6 +39,9 @@ type EmbeddedServer struct {
 // New creates a new embedded SpiceDB server with the given configuration.
 func New(config Config) (*EmbeddedServer, error) {
 	config.WithDefaults()
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
 
 	// Create datastore based on configuration
 	ds, err := createDatastore(context.Background(), config)
@@ -132,11 +135,8 @@ func (es *EmbeddedServer) Start(ctx context.Context) error {
 		}
 	}()
 
-	// Wait a moment for server to start
-	time.Sleep(100 * time.Millisecond)
-
-	// Get client connection
-	conn, err := es.server.GRPCDialContext(ctx, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Get client connection with retry/backoff
+	conn, err := es.dialWithRetry(ctx)
 	if err != nil {
 		es.cancel()
 		es.wg.Wait()
@@ -270,24 +270,31 @@ func (es *EmbeddedServer) Client(ctx context.Context) (*grpc.ClientConn, error) 
 // ReloadSchema manually reloads schema files.
 func (es *EmbeddedServer) ReloadSchema(ctx context.Context) error {
 	es.mu.RLock()
-	defer es.mu.RUnlock()
-
 	if !es.started {
+		es.mu.RUnlock()
 		return fmt.Errorf("server is not started")
 	}
 
 	if es.reloader == nil {
+		es.mu.RUnlock()
 		return fmt.Errorf("no schema reloader available")
 	}
 
-	err := es.reloader.Reload(ctx)
-
-	// Call registered callbacks
+	reloader := es.reloader
 	es.mu.RUnlock()
-	for _, callback := range es.reloadCallbacks {
+
+	// Perform reload outside lock to avoid blocking other operations
+	err := reloader.Reload(ctx)
+
+	// Get callbacks under lock, then invoke outside lock
+	es.mu.RLock()
+	callbacks := make([]func(error), len(es.reloadCallbacks))
+	copy(callbacks, es.reloadCallbacks)
+	es.mu.RUnlock()
+
+	for _, callback := range callbacks {
 		callback(err)
 	}
-	es.mu.RLock()
 
 	return err
 }
@@ -299,4 +306,39 @@ func (es *EmbeddedServer) OnSchemaReloaded(callback func(error)) {
 	defer es.mu.Unlock()
 
 	es.reloadCallbacks = append(es.reloadCallbacks, callback)
+}
+
+// dialWithRetry attempts to connect to the gRPC server with exponential backoff.
+func (es *EmbeddedServer) dialWithRetry(ctx context.Context) (*grpc.ClientConn, error) {
+	const (
+		maxRetries     = 10
+		initialBackoff = 10 * time.Millisecond
+		maxBackoff     = 500 * time.Millisecond
+	)
+
+	var lastErr error
+	backoff := initialBackoff
+
+	for i := 0; i < maxRetries; i++ {
+		conn, err := es.server.GRPCDialContext(ctx, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-es.ctx.Done():
+			return nil, es.ctx.Err()
+		case <-time.After(backoff):
+			// Exponential backoff with cap
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("failed after %d retries: %w", maxRetries, lastErr)
 }

@@ -1,6 +1,6 @@
 module github.com/akoserwal/embedspicedb
 
-go 1.25.5
+go 1.25.3
 
 require (
 	buf.build/gen/go/prometheus/prometheus/protocolbuffers/go v1.36.10-20251118093737-4105057cc7d4.1

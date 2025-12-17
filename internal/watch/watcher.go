@@ -17,11 +17,13 @@ import (
 type FileWatcher struct {
 	watcher    *fsnotify.Watcher
 	files      []string
+	absFiles   map[string]struct{}
 	reloadFunc func() error
 	debounce   time.Duration
 	mu         sync.Mutex
 	pending    map[string]time.Time
 	timer      *time.Timer
+	stopped    bool
 	ctx        context.Context
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
@@ -36,9 +38,21 @@ func NewFileWatcher(files []string, debounce time.Duration, reloadFunc func() er
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	absFiles := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		absPath, err := filepath.Abs(file)
+		if err != nil {
+			cancel()
+			_ = watcher.Close()
+			return nil, fmt.Errorf("failed to get absolute path for %s: %w", file, err)
+		}
+		absFiles[absPath] = struct{}{}
+	}
+
 	fw := &FileWatcher{
 		watcher:    watcher,
 		files:      files,
+		absFiles:   absFiles,
 		reloadFunc: reloadFunc,
 		debounce:   debounce,
 		pending:    make(map[string]time.Time),
@@ -53,12 +67,7 @@ func NewFileWatcher(files []string, debounce time.Duration, reloadFunc func() er
 func (fw *FileWatcher) Start() error {
 	// Prefer watching the file path directly (much cheaper on kqueue/macOS than watching a large directory).
 	// Fall back to watching the parent directory if the file does not exist yet.
-	for _, file := range fw.files {
-		absPath, err := filepath.Abs(file)
-		if err != nil {
-			return fmt.Errorf("failed to get absolute path for %s: %w", file, err)
-		}
-
+	for absPath := range fw.absFiles {
 		if _, err := os.Stat(absPath); err == nil {
 			if err := fw.watcher.Add(absPath); err != nil {
 				return fmt.Errorf("failed to watch file %s: %w", absPath, err)
@@ -83,10 +92,16 @@ func (fw *FileWatcher) Start() error {
 
 // Stop stops watching files.
 func (fw *FileWatcher) Stop() error {
-	fw.cancel()
+	fw.mu.Lock()
+	fw.stopped = true
 	if fw.timer != nil {
 		fw.timer.Stop()
+		fw.timer = nil
 	}
+	fw.pending = make(map[string]time.Time)
+	fw.mu.Unlock()
+
+	fw.cancel()
 	err := fw.watcher.Close()
 	fw.wg.Wait()
 	return err
@@ -122,21 +137,17 @@ func (fw *FileWatcher) watchLoop() {
 }
 
 func (fw *FileWatcher) isWatchedFile(path string) bool {
-	for _, file := range fw.files {
-		absPath, err := filepath.Abs(file)
-		if err != nil {
-			continue
-		}
-		if absPath == path {
-			return true
-		}
-	}
-	return false
+	_, ok := fw.absFiles[path]
+	return ok
 }
 
 func (fw *FileWatcher) handleFileChange(filePath string) {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
+
+	if fw.stopped {
+		return
+	}
 
 	now := time.Now()
 	fw.pending[filePath] = now
@@ -148,8 +159,18 @@ func (fw *FileWatcher) handleFileChange(filePath string) {
 
 	// Set up debounced reload
 	fw.timer = time.AfterFunc(fw.debounce, func() {
+		select {
+		case <-fw.ctx.Done():
+			return
+		default:
+		}
+
 		fw.mu.Lock()
 		defer fw.mu.Unlock()
+
+		if fw.stopped {
+			return
+		}
 
 		// Check if there are still pending changes
 		if len(fw.pending) == 0 {
